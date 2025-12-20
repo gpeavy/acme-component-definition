@@ -3,9 +3,15 @@
 source config.env
 
 function github-branch-commit() {
-    msg "Github ref $GITHUB_REF" 
-    GIT_BRANCH=${GITHUB_REF##*/}
-    msg "Github branch: ($GIT_BRANCH)" 
+    local ref
+    if [[ -n "$GITHUB_REF" ]]; then
+        ref="$GITHUB_REF"
+    elif [[ -n "$CI_COMMIT_REF_NAME" ]]; then
+        ref="$CI_COMMIT_REF_NAME"
+    fi
+    msg "Ref $ref"
+    GIT_BRANCH=${ref##*/}
+    msg "Branch: ($GIT_BRANCH)"
     local head_ref branch_ref
     head_ref=$(git rev-parse HEAD)
     git config --global user.email "$EMAIL"
@@ -14,19 +20,35 @@ function github-branch-commit() {
         err "failed to get HEAD reference"
         return 1
     fi
-    branch_ref=$(git rev-parse "$GIT_BRANCH")
+
+    # In GitLab, sometimes we are in detached HEAD state or on the branch already.
+    # We try to ensure we are on the branch.
+    branch_ref=$(git rev-parse "$GIT_BRANCH" 2>/dev/null)
     if [[ $? -ne 0 || ! $branch_ref ]]; then
-        err "failed to get $GIT_BRANCH reference"
-        return 1
+        # Try fetching origin
+        git fetch origin "$GIT_BRANCH"
+        branch_ref=$(git rev-parse FETCH_HEAD)
+        if [[ $? -ne 0 || ! $branch_ref ]]; then
+           err "failed to get $GIT_BRANCH reference"
+           return 1
+        fi
     fi
+
     if [[ $head_ref != $branch_ref ]]; then
         msg "HEAD ref ($head_ref) does not match $GIT_BRANCH ref ($branch_ref)"
         msg "someone may have pushed new commits before this build cloned the repo"
+        # In GitLab CI, we might want to continue or fail.
+        # But existing logic returns 0.
         return 0
     fi
-    if ! git checkout "$GIT_BRANCH"; then
-        err "failed to checkout $GIT_BRANCH"
-        return 1
+
+    # Checkout branch if not already on it
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    if [[ "$current_branch" != "$GIT_BRANCH" ]]; then
+        if ! git checkout "$GIT_BRANCH"; then
+            err "failed to checkout $GIT_BRANCH"
+            return 1
+        fi
     fi
 
     if ! git add component-definitions; then
@@ -41,7 +63,7 @@ function github-branch-commit() {
         msg "Nothing to commit" 
         return 0 
     fi
-    # make Github CI skip this build
+    # make Github CI skip this build (and GitLab via [skip ci] usually, but [ci skip] also works on GitLab)
     if ! git commit -m "Autoupdate [ci skip]" -s; then
         err "failed to commit updates"
         return 1
@@ -52,11 +74,20 @@ function github-branch-commit() {
         	return 0 
     	fi
         echo "Version tag: ${VERSION_TAG}" 
-        if ! git push --delete origin "v${VERSION_TAG}"; then
-            err "failed to delete git tag: v${VERSION_TAG}"
-            return 1
+        # Check if tag exists on remote
+        if git ls-remote --tags origin "v${VERSION_TAG}" | grep -q "v${VERSION_TAG}"; then
+             msg "Tag v${VERSION_TAG} exists on remote, deleting..."
+             if ! git push --delete origin "v${VERSION_TAG}"; then
+                err "failed to delete git tag: v${VERSION_TAG}"
+                return 1
+             fi
         fi
-        git tag -d "v${VERSION_TAG}"
+
+        # Also check local tag and delete it if exists
+        if git rev-parse "v${VERSION_TAG}" >/dev/null 2>&1; then
+             git tag -d "v${VERSION_TAG}"
+        fi
+
         echo "Adding version tag v${VERSION_TAG} to branch $GIT_BRANCH"
         if ! git tag "v${VERSION_TAG}" -m "Bump version"; then
             err "failed to create git tag: v${VERSION_TAG}"
@@ -94,4 +125,3 @@ then
 else
 	github-branch-commit
 fi
-
