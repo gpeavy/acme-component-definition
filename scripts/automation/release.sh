@@ -11,7 +11,13 @@ else
     version_tag=$(semantic-release print-version)
 	echo "Bumping version of component-definitions to ${version_tag}" 
 	export VERSION_TAG="$version_tag"
-	echo "VERSION_TAG=${VERSION_TAG}" >> $GITHUB_ENV
+    if [ -n "$GITHUB_ENV" ]; then
+	    echo "VERSION_TAG=${VERSION_TAG}" >> $GITHUB_ENV
+    else
+        # For GitLab CI, we write to a dotenv file, e.g., build.env
+        # The filename should be defined in the CI config artifacts
+        echo "VERSION_TAG=${VERSION_TAG}" > build.env
+    fi
 	COUNT=$(ls -1 md_components | wc -l)
 	if [ $COUNT -lt 1 ]
 	then
