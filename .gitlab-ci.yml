@@ -1,0 +1,79 @@
+stages:
+  - update
+  - release
+  - downstream
+  - merge
+
+variables:
+  # Ensure we use python 3.9 image or similar
+  # GIT_TOKEN must be defined in CI/CD settings
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+.base_job:
+  image: python:3.9
+  before_script:
+    - python --version
+    - source scripts/automation/install_trestle.sh
+
+auto-content-update:
+  extends: .base_job
+  stage: update
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+  script:
+    - bash scripts/automation/check_and_update_all.sh
+    - bash scripts/automation/push.sh
+
+release:
+  extends: .base_job
+  stage: release
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - source scripts/automation/release.sh
+    - bash scripts/automation/push.sh
+  artifacts:
+    reports:
+      dotenv: build.env
+
+downstream-repo-update:
+  image: python:3.9
+  stage: downstream
+  needs: ["release"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  script:
+    - apt-get update && apt-get install -y git
+    - source config.env
+    - bash scripts/automation/check_component_definition.sh || EXIT_CODE=$?
+    - echo "Exit code $EXIT_CODE"
+    - |
+      if [ "$EXIT_CODE" == "1" ]; then
+        # The script update_downstream.sh expects to 'cd' into $REPO_COMPONENT_DEFINITION
+        # and push to URL_COMPONENT_DEFINITION.
+        # So we clone the component definition repo.
+        git clone https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${REPO_BASE}/${REPO_COMPONENT_DEFINITION}.git ${REPO_COMPONENT_DEFINITION}
+        bash scripts/automation/update_downstream.sh
+      else
+        echo "Skipping downstream update"
+      fi
+
+merge-main-to-develop:
+  stage: merge
+  needs: ["release"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  image: bitnami/git:latest
+  script:
+    - source config.env
+    - git config --global user.email "${EMAIL}"
+    - git config --global user.name "${NAME}"
+    - git fetch origin develop
+    - git checkout develop
+    - git merge main -m "chore: Merge back version tags and changelog into develop."
+    - git push "https://${GIT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" develop
